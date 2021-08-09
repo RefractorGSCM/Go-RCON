@@ -14,7 +14,7 @@ Go-RCON works using two TCP socket connections. One socket is for command execut
 
 ## How do I use it?
 
-First, you should create a `ClientConfig` instance and fill in the required fields. Currently, the following fields are required: `Host`, `Port`, `Password`. There also the following optional fields: `BroadcastHandler`, `SendHeartbeatCommand`, `HeartbeatCommandInterval`. For more information on config fields, check out the config section.
+First, you should create a `ClientConfig` instance and fill in the required fields. Currently, the following fields are required: `Host`, `Port`, `Password`.
 
 ```
 clientConfig := &rcon.ClientConfig{
