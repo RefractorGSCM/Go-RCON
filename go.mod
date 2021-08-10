@@ -1,3 +1,3 @@
-module github.com/refractorgscm/go-rcon
+module github.com/refractorgscm/rcon
 
 go 1.15
