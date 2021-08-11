@@ -49,7 +49,6 @@ func (p *payload) getSize() int32 {
 
 func (p *payload) isNotBroadcast() bool {
 	for _, pattern := range p.NonBroadcastPatterns {
-
 		// If payload body matches a known non-broadcast pattern, we can safely
 		// assume that it's not a broadcast so we return true.
 		if pattern.MatchString(string(p.Body)) {

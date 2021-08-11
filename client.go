@@ -196,6 +196,7 @@ func (c *Client) ListenForBroadcasts(broadcastTypes []string, errors chan error)
 				continue
 			}
 
+			response.NonBroadcastPatterns = c.config.NonBroadcastPatterns
 			if response.isNotBroadcast() {
 				continue
 			}
