@@ -65,7 +65,7 @@ func TestClient_Connect(t *testing.T) {
 	type fields struct {
 		address          string
 		password         string
-		broadcastHandler broadcastHandlerFunc
+		broadcastHandler BroadcastHandlerFunc
 		mainConn         *net.TCPConn
 		broadcastConn    *net.TCPConn
 	}
@@ -115,7 +115,7 @@ func TestClient_ExecCommand(t *testing.T) {
 	type fields struct {
 		address          string
 		password         string
-		broadcastHandler broadcastHandlerFunc
+		broadcastHandler BroadcastHandlerFunc
 		mainConn         *net.TCPConn
 		broadcastConn    *net.TCPConn
 	}

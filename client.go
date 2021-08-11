@@ -15,8 +15,8 @@ const (
 	serverDataExecCommand = 2
 )
 
-type broadcastHandlerFunc func(string)
-type disconnectHandlerFunc func(err error, expected bool)
+type BroadcastHandlerFunc func(string)
+type DisconnectHandlerFunc func(err error, expected bool)
 
 // Client is the struct which facilitates all RCON client functionality.
 // Clients should not be created manually, instead they should be created using NewClient.
@@ -37,8 +37,8 @@ type ClientConfig struct {
 	AttemptReconnect         bool                  // optional. default: false
 	HeartbeatCommandInterval time.Duration         // optional. default: 30 seconds
 	EnableBroadcasts         bool                  // optional
-	BroadcastHandler         broadcastHandlerFunc  // optional
-	DisconnectHandler        disconnectHandlerFunc // optional
+	BroadcastHandler         BroadcastHandlerFunc  // optional
+	DisconnectHandler        DisconnectHandlerFunc // optional
 
 	// optional. any payloads matching a pattern in this list will be ignored and not relayed over the broadcast
 	// handler. This could be useful if your game autonomously sends useless or non broadcast information over RCON.
@@ -63,20 +63,20 @@ func NewClient(config *ClientConfig) *Client {
 	return client
 }
 
-// SetBroadcastHandler accepts a broadcastHandlerFunc and updates the client's internal broadcastHandler
+// SetBroadcastHandler accepts a BroadcastHandlerFunc and updates the client's internal broadcastHandler
 // field to the one passed in. By default, broadcastHandler is null so this function must be used at least
 // once to get access to broadcast messages.
 //
 // It should also be noted that not all messages will necessarily be broadcasts. For example, the "Alive" command
 // used to keep the socket alive will also have it's output sent to the broadcastHandler. Because of this, it's
 // important that you make sure you only process the data you wish with your own logic within your handler.
-func (c *Client) SetBroadcastHandler(handler broadcastHandlerFunc) {
+func (c *Client) SetBroadcastHandler(handler BroadcastHandlerFunc) {
 	c.config.BroadcastHandler = handler
 }
 
-// SetDisconnectHandler accepts a disconnectHandlerFunc and updates the client's internal disconnectHandler
+// SetDisconnectHandler accepts a DisconnectHandlerFunc and updates the client's internal disconnectHandler
 // field to the value passed in. The disconnect handler is called when a socket disconnects.
-func (c *Client) SetDisconnectHandler(handler disconnectHandlerFunc) {
+func (c *Client) SetDisconnectHandler(handler DisconnectHandlerFunc) {
 	c.config.DisconnectHandler = handler
 }
 
