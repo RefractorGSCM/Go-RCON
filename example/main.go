@@ -2,27 +2,31 @@ package main
 
 import (
 	"fmt"
-	"github.com/refractor/go-rcon"
+	"github.com/refractorgscm/rcon"
 	"log"
+	"regexp"
 	"time"
 )
 
 var (
 	host            = "localhost"
 	port     uint16 = 7778
-	password        = "RconPassword"
+	password        = "password"
 )
 
 func main() {
 	clientConfig := &rcon.ClientConfig{
-		Host:              host,
-		Port:              port,
-		Password:          password,
-		EnableBroadcasts:  true,
-		BroadcastHandler:  broadcastHandler,
-		DisconnectHandler: disconnectHandler,
-		// SendHeartbeatCommand:     true,
-		// HeartbeatCommandInterval: time.Second * 10,
+		Host:                     host,
+		Port:                     port,
+		Password:                 password,
+		EnableBroadcasts:         true,
+		BroadcastHandler:         broadcastHandler,
+		DisconnectHandler:        disconnectHandler,
+		SendHeartbeatCommand:     true,
+		HeartbeatCommandInterval: time.Second * 5,
+		NonBroadcastPatterns: []*regexp.Regexp{
+			regexp.MustCompile("^Keeping client alive for another [0-9]+ seconds$"),
+		},
 	}
 
 	client := rcon.NewClient(clientConfig)
@@ -42,9 +46,11 @@ func main() {
 	// Connect broadcast socket to the RCON server and start listening for broadcasts
 	client.ListenForBroadcasts(broadcastTypes, nil)
 
+	_, _ = client.ExecCommand("Alive")
+
 	// Disconnect after 20 seconds
 	go func() {
-		time.Sleep(time.Second * 60)
+		time.Sleep(time.Second * 20)
 
 		if err := client.Disconnect(); err != nil {
 			fmt.Printf("Disconnect error: %v\n", err)
@@ -63,14 +69,14 @@ func main() {
 		}
 
 		// Run basic command on the main RCON socket for demo purposes.
-		// response, err := client.ExecCommand("PlayerList")
-		// if err != nil {
-		// 	log.Fatal(err)
-		// }
+		//response, err := client.ExecCommand("PlayerList")
+		//if err != nil {
+		//	log.Fatal(err)
+		//}
 
 		// fmt.Println("Main Socket Response:", response)
 
-		time.Sleep(10 * time.Second)
+		time.Sleep(1 * time.Second)
 	}
 }
 
