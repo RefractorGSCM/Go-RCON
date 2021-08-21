@@ -11,7 +11,7 @@ import (
 var (
 	host            = "localhost"
 	port     uint16 = 7778
-	password        = "password"
+	password        = "RconPassword"
 )
 
 func main() {
@@ -36,15 +36,12 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Create a string slice containing each broadcast type you wish to listen for.
-	broadcastTypes := []string{"allon"}
-
 	// Optional but highly recommended: create an error channel to receive errors from
 	// the ListenForBroadcasts goroutine.
 	errors := make(chan error)
 
 	// Connect broadcast socket to the RCON server and start listening for broadcasts
-	client.ListenForBroadcasts(broadcastTypes, nil)
+	client.ListenForBroadcasts([]string{"listen allon"}, nil)
 
 	_, _ = client.ExecCommand("Alive")
 
