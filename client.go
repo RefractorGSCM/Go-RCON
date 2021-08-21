@@ -3,7 +3,6 @@ package rcon
 import (
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"regexp"
 	"strings"
@@ -148,14 +147,16 @@ func (c *Client) ExecCommand(command string) (string, error) {
 // ListenForBroadcasts is the function which kicks of broadcast listening. It opens a second socket to the
 // RCON server meant specifically for listening for broadcasts and periodically runs a command to keep the
 // connection alive.
-func (c *Client) ListenForBroadcasts(broadcastTypes []string, errors chan error) {
+//
+// You can choose to pass in initCommands which are run on the broadcast listener socket when connection is made.
+func (c *Client) ListenForBroadcasts(initCommands []string, errors chan error) {
 	// Make sure broadcast listening is enabled
 	if !c.config.EnableBroadcasts {
 		return
 	}
 
 	// Open broadcast socket
-	err := c.connectBroadcastListener(broadcastTypes)
+	err := c.connectBroadcastListener(initCommands)
 	if err != nil {
 		errors <- err
 	}
@@ -176,7 +177,7 @@ func (c *Client) ListenForBroadcasts(broadcastTypes []string, errors chan error)
 						fmt.Println("Attempting to reconnect...")
 
 						// If EOF was read, then try reconnecting to the server.
-						err := c.connectBroadcastListener(broadcastTypes)
+						err := c.connectBroadcastListener(initCommands)
 						if err != nil {
 							errors <- err
 						}
@@ -305,7 +306,7 @@ func (c *Client) openBroadcastListenerSocket() error {
 	return nil
 }
 
-func (c *Client) connectBroadcastListener(broadcastTypes []string) error {
+func (c *Client) connectBroadcastListener(initCommands []string) error {
 	// Dial out with a second connection specifically meant
 	// for receiving broadcasts.
 	err := c.openBroadcastListenerSocket()
@@ -320,13 +321,11 @@ func (c *Client) connectBroadcastListener(broadcastTypes []string) error {
 	}
 
 	// Subscribe to broadcast types
-	for _, broadcastType := range broadcastTypes {
-		_, err := c.execCommand(c.broadcastConn, fmt.Sprintf("listen %s", broadcastType))
+	for _, cmd := range initCommands {
+		_, err := c.execCommand(c.broadcastConn, cmd)
 		if err != nil {
 			return err
 		}
-
-		log.Printf("RCON client listening for %s broadcasts.\n", broadcastType)
 	}
 
 	return nil
