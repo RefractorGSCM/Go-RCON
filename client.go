@@ -123,12 +123,16 @@ func (c *Client) Connect() error {
 }
 
 func (c *Client) Disconnect() error {
-	if err := c.mainConn.Close(); err != nil {
-		return err
+	if c.mainConn != nil {
+		if err := c.mainConn.Close(); err != nil {
+			return err
+		}
 	}
 
-	if err := c.broadcastConn.Close(); err != nil {
-		return err
+	if c.broadcastConn != nil {
+		if err := c.broadcastConn.Close(); err != nil {
+			return err
+		}
 	}
 
 	if c.config.DisconnectHandler != nil {
