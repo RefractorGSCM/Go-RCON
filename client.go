@@ -165,6 +165,10 @@ func (c *Client) Connect() error {
 		log.Println("Authentication successful")
 	}
 
+	if c.config.SendHeartbeatCommand {
+		c.startMainHeartBeat(nil)
+	}
+
 	return nil
 }
 
@@ -308,6 +312,36 @@ func (c *Client) startBroadcasterHeartBeat(errors chan error) {
 				}
 
 				_, err = c.broadcastConn.Write(keepAlivePacket)
+				if err != nil {
+					errors <- err
+					return
+				}
+				break
+			case <-done:
+				ticker.Stop()
+				close(done)
+			}
+		}
+	}()
+}
+
+func (c *Client) startMainHeartBeat(errors chan error) {
+	ticker := time.NewTicker(c.config.HeartbeatCommandInterval)
+	done := make(chan bool)
+
+	// Start keepalive routine
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				keepAlivePayload := newPayload(serverDataExecCommand, []byte("Alive"), c.config.NonBroadcastPatterns)
+				keepAlivePacket, err := buildPacketFromPayload(keepAlivePayload)
+				if err != nil {
+					errors <- err
+					return
+				}
+
+				_, err = c.mainConn.Write(keepAlivePacket)
 				if err != nil {
 					errors <- err
 					return
