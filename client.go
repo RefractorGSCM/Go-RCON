@@ -167,6 +167,10 @@ func (c *Client) Connect() error {
 
 	if c.config.SendHeartbeatCommand {
 		c.startMainHeartBeat(nil)
+
+		if c.config.Debug {
+			log.Println("Main conn heartbeat routine started")
+		}
 	}
 
 	return nil
@@ -311,6 +315,10 @@ func (c *Client) startBroadcasterHeartBeat(errors chan error) {
 					return
 				}
 
+				if c.config.Debug {
+					log.Println("Sending broadcast conn heartbeat command")
+				}
+
 				_, err = c.broadcastConn.Write(keepAlivePacket)
 				if err != nil {
 					errors <- err
@@ -339,6 +347,10 @@ func (c *Client) startMainHeartBeat(errors chan error) {
 				if err != nil {
 					errors <- err
 					return
+				}
+
+				if c.config.Debug {
+					log.Println("Sending main conn heartbeat command")
 				}
 
 				_, err = c.mainConn.Write(keepAlivePacket)
