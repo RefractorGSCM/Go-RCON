@@ -7,6 +7,7 @@ import (
 	"net"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -26,6 +27,8 @@ type Client struct {
 	mainConn      *net.TCPConn
 	broadcastConn *net.TCPConn
 	config        *ClientConfig
+	mainMtx       sync.Mutex
+	bcastMtx      sync.Mutex
 }
 
 // ClientConfig holds configurable values for use by the RCON client.
@@ -182,6 +185,9 @@ func (c *Client) Disconnect() error {
 			log.Println("Disconnecting from main conn")
 		}
 
+		c.mainMtx.Lock()
+		defer c.mainMtx.Unlock()
+
 		if err := c.mainConn.Close(); err != nil {
 			if c.config.Debug {
 				log.Println("Could not disconnect from main conn", err)
@@ -195,6 +201,9 @@ func (c *Client) Disconnect() error {
 		if c.config.Debug {
 			log.Println("Disconnecting from broadcast conn")
 		}
+
+		c.bcastMtx.Lock()
+		defer c.bcastMtx.Unlock()
 
 		if err := c.broadcastConn.Close(); err != nil {
 			if c.config.Debug {
@@ -217,12 +226,14 @@ func (c *Client) Disconnect() error {
 }
 
 // ExecCommand executes a command on the RCON server. It returns the response body from the server
-// or an error if something went wrong.
+// or an error if something went wrong. This command is executed on the main socket.
 func (c *Client) ExecCommand(command string) (string, error) {
 	if c.config.Debug {
 		log.Println("Executing command:", command)
 	}
 
+	c.mainMtx.Lock()
+	defer c.mainMtx.Unlock()
 	return c.execCommand(c.mainConn, command)
 }
 
@@ -258,7 +269,9 @@ func (c *Client) ListenForBroadcasts(initCommands []string, errors chan error) {
 	// Start listening for broadcasts
 	go func() {
 		for {
+			c.bcastMtx.Lock()
 			response, err := buildPayloadFromPacket(c.broadcastConn)
+			c.bcastMtx.Unlock()
 			if err != nil {
 				if err == io.EOF || err == io.ErrClosedPipe {
 					fmt.Println("Broadcast listener closed")
@@ -319,7 +332,9 @@ func (c *Client) startBroadcasterHeartBeat(errors chan error) {
 					log.Println("Sending broadcast conn heartbeat command")
 				}
 
+				c.bcastMtx.Lock()
 				_, err = c.broadcastConn.Write(keepAlivePacket)
+				c.bcastMtx.Unlock()
 				if err != nil {
 					errors <- err
 					return
@@ -342,10 +357,12 @@ func (c *Client) startMainHeartBeat(errors chan error) {
 		for {
 			select {
 			case <-ticker.C:
+				c.mainMtx.Lock()
 				_, err := c.execCommand(c.mainConn, "Alive")
 				if err != nil {
 					errors <- err
 				}
+				c.mainMtx.Unlock()
 				break
 			case <-done:
 				ticker.Stop()
@@ -471,6 +488,9 @@ func (c *Client) connectBroadcastListener(initCommands []string) error {
 
 		return err
 	}
+
+	c.mainMtx.Lock()
+	defer c.mainMtx.Unlock()
 
 	// Subscribe to broadcast types
 	for _, cmd := range initCommands {
