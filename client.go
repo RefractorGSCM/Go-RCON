@@ -342,21 +342,9 @@ func (c *Client) startMainHeartBeat(errors chan error) {
 		for {
 			select {
 			case <-ticker.C:
-				keepAlivePayload := newPayload(serverDataExecCommand, []byte("Alive"), c.config.NonBroadcastPatterns)
-				keepAlivePacket, err := buildPacketFromPayload(keepAlivePayload)
+				_, err := c.execCommand(c.mainConn, "Alive")
 				if err != nil {
 					errors <- err
-					return
-				}
-
-				if c.config.Debug {
-					log.Println("Sending main conn heartbeat command")
-				}
-
-				_, err = c.mainConn.Write(keepAlivePacket)
-				if err != nil {
-					errors <- err
-					return
 				}
 				break
 			case <-done:
