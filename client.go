@@ -321,18 +321,29 @@ func (c *Client) startBroadcasterHeartBeat(errors chan error) {
 		for {
 			select {
 			case <-ticker.C:
+				keepAlivePayload := newPayload(serverDataExecCommand, []byte("Alive"), c.config.NonBroadcastPatterns)
+				keepAlivePacket, err := buildPacketFromPayload(keepAlivePayload)
+				if err != nil {
+					errors <- err
+					return
+				}
+
 				if c.config.Debug {
 					log.Println("Sending broadcast conn heartbeat command")
 				}
 
-				c.mainMtx.Lock()
-				_, err := c.execCommand(c.broadcastConn, "Alive")
+				c.bcastMtx.Lock()
+				_, err = c.broadcastConn.Write(keepAlivePacket)
+				c.bcastMtx.Unlock()
 				if err != nil {
 					errors <- err
+					return
 				}
-				c.mainMtx.Unlock()
 				break
 			case <-done:
+				if c.config.Debug {
+					log.Println("Broadcast heartbeat ticker done")
+				}
 				ticker.Stop()
 				close(done)
 			}
@@ -361,6 +372,10 @@ func (c *Client) startMainHeartBeat(errors chan error) {
 				c.mainMtx.Unlock()
 				break
 			case <-done:
+				if c.config.Debug {
+					log.Println("Main heartbeat ticker done")
+				}
+
 				ticker.Stop()
 				close(done)
 			}
