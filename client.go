@@ -2,514 +2,394 @@ package rcon
 
 import (
 	"fmt"
+	"github.com/pkg/errors"
+	"github.com/refractorgscm/rcon/endian"
+	"github.com/refractorgscm/rcon/errs"
+	"github.com/refractorgscm/rcon/packet"
 	"io"
-	"log"
 	"net"
-	"regexp"
-	"strings"
 	"sync"
 	"time"
 )
 
-const (
-	serverDataAuth        = 3
-	serverDataExecCommand = 2
-)
-
-type BroadcastHandlerFunc func(string)
-type DisconnectHandlerFunc func(err error, expected bool)
-
-// Client is the struct which facilitates all RCON client functionality.
-// Clients should not be created manually, instead they should be created using NewClient.
 type Client struct {
-	address       string
-	password      string
-	mainConn      *net.TCPConn
-	broadcastConn *net.TCPConn
-	config        *ClientConfig
-	mainMtx       sync.Mutex
-	bcastMtx      sync.Mutex
+	*Config
+	conn     *net.TCPConn
+	connLock sync.Mutex
+	log      Logger
+
+	terminate  chan uint8
+	waitGroup  *sync.WaitGroup
+	wqLock     sync.Mutex
+	rqLock     sync.Mutex
+	wgLock     sync.Mutex
+	writeQueue chan packet.Packet
+	readQueue  map[int32]chan packet.Packet
 }
 
-// ClientConfig holds configurable values for use by the RCON client.
-type ClientConfig struct {
-	Host                     string                // required
-	Port                     uint16                // required
-	Password                 string                // required
-	SendHeartbeatCommand     bool                  // optional. default: false
-	AttemptReconnect         bool                  // optional. default: false
-	HeartbeatCommandInterval time.Duration         // optional. default: 30 seconds
-	EnableBroadcasts         bool                  // optional
-	BroadcastHandler         BroadcastHandlerFunc  // optional
-	DisconnectHandler        DisconnectHandlerFunc // optional
+type BroadcastHandler func(string)
+type BroadcastMessageChecker func(p packet.Packet) bool
+type DisconnectHandler func(error, bool)
 
-	// optional. any payloads matching a pattern in this list will be ignored and not relayed over the broadcast
-	// handler. This could be useful if your game autonomously sends useless or non broadcast information over RCON.
-	NonBroadcastPatterns []*regexp.Regexp
+type Config struct {
+	Host     string
+	Port     uint16
+	Password string
 
-	Debug bool
+	// ConnTimeout is the timeout for TCP connection read/write operations with a deadline.
+	ConnTimeout time.Duration
+
+	// QueueWriteTimeout is the timeout for writing to the internal packet queues. Higher values can cause delays if
+	// unexpected packets are received.
+	//
+	// Default: 250ms
+	QueueWriteTimeout time.Duration
+
+	// QueueReadTimeout is the timeout for reading from the internal packet queues.
+	//
+	// Default: 2s
+	QueueReadTimeout time.Duration
+
+	// EndianMode represents the byte order being used by whatever game you're using this library with. Valve games
+	// typically use little endian, but other games may use big endian. You can switch this as needed.
+	EndianMode endian.Mode
+
+	// BroadcastHandler is a function which will be called with a message whenever a broadcast message is received.
+	BroadcastHandler BroadcastHandler
+
+	// BroadcastChecker is a function which should be implemented. It is used to check if a packet is a broadcast.
+	// If BroadcastChecker returns true, the packet will be treated as a broadcast.
+	BroadcastChecker BroadcastMessageChecker
+
+	// RestrictedPacketIDs is a slice of int32s which cannot be used as packet IDs. Some games use certain packet IDs to
+	// denote a special response or message. For example, Mordhau uses these packet IDs to denote broadcast messages.
+	//
+	// The special packet IDs of whatever game you're using this library with should be put within this slice to ensure
+	// that the received and sent data is as you'd expect and to avoid potential client/server confusion.
+	RestrictedPacketIDs []int32
+
+	// DisconnectHandler is a function which will be called when the client gets disconnected.
+	DisconnectHandler DisconnectHandler
 }
 
-// NewClient is used to properly create a new instance of Client.
-// It takes in the address and port of the RCON server you wish to connect to
-// as well as your RCON password.
-func NewClient(config *ClientConfig) *Client {
-	address := fmt.Sprintf("%s:%d", config.Host, config.Port)
+const DefaultTimeout = time.Second * 2
 
-	client := &Client{
-		address:  address,
-		password: config.Password,
-		config:   config,
+func NewClient(config *Config, logger Logger) *Client {
+	c := &Client{
+		Config:     config,
+		log:        &DefaultLogger{},
+		waitGroup:  &sync.WaitGroup{},
+		terminate:  make(chan uint8),
+		writeQueue: make(chan packet.Packet),
+		readQueue:  map[int32]chan packet.Packet{},
 	}
 
-	// If client.config.HeartbeatCommandInterval is 0s, then assume a value wasn't provided and
-	// set it to the default value.
-
-	return client
-}
-
-// SetBroadcastHandler accepts a BroadcastHandlerFunc and updates the client's internal broadcastHandler
-// field to the one passed in. By default, broadcastHandler is null so this function must be used at least
-// once to get access to broadcast messages.
-//
-// It should also be noted that not all messages will necessarily be broadcasts. For example, the "Alive" command
-// used to keep the socket alive will also have it's output sent to the broadcastHandler. Because of this, it's
-// important that you make sure you only process the data you wish with your own logic within your handler.
-func (c *Client) SetBroadcastHandler(handler BroadcastHandlerFunc) {
-	if c.config.Debug {
-		log.Println("Broadcast handler set")
+	if logger != nil {
+		c.log = logger
 	}
 
-	c.config.BroadcastHandler = handler
-}
-
-// SetDisconnectHandler accepts a DisconnectHandlerFunc and updates the client's internal disconnectHandler
-// field to the value passed in. The disconnect handler is called when a socket disconnects.
-func (c *Client) SetDisconnectHandler(handler DisconnectHandlerFunc) {
-	if c.config.Debug {
-		log.Println("Disconnect handler set")
+	if c.EndianMode == nil {
+		c.EndianMode = endian.Little
 	}
 
-	c.config.DisconnectHandler = handler
-}
-
-// SetSendHeartbeatCommand enables an occasional heartbeat command to be sent to the server to keep the broadcasting
-// socket alive.
-func (c *Client) SetSendHeartbeatCommand(enabled bool) {
-	if c.config.Debug {
-		log.Println("Heartbeat command set")
+	if c.ConnTimeout <= 0 {
+		c.ConnTimeout = DefaultTimeout
 	}
 
-	c.config.SendHeartbeatCommand = enabled
-}
-
-// SetHeartbeatCommandInterval sets the interval at which the client will send out a heartbeat command to the server
-// to keep the broadcast socket alive. This is only done if heartbeat commands were enabled.
-func (c *Client) SetHeartbeatCommandInterval(interval time.Duration) {
-	if c.config.Debug {
-		log.Println("Heartbeat interval set")
+	if c.BroadcastChecker == nil {
+		c.BroadcastChecker = func(p packet.Packet) bool {
+			return false
+		}
 	}
 
-	c.config.HeartbeatCommandInterval = interval
-}
-
-// AddNonBroadcastPattern adds a non broadcast pattern to the client.
-func (c *Client) AddNonBroadcastPattern(pattern *regexp.Regexp) {
-	if c.config.Debug {
-		log.Println("Non broadcast pattern added")
+	if c.QueueWriteTimeout <= 0 {
+		c.QueueWriteTimeout = time.Millisecond * 250
 	}
 
-	c.config.NonBroadcastPatterns = append(c.config.NonBroadcastPatterns, pattern)
+	if c.QueueReadTimeout <= 0 {
+		c.QueueReadTimeout = time.Second * 2
+	}
+
+	return c
 }
 
-// Connect tries to open a socket and authentciated to the RCON server specified during client setup.
-// This socket is used exclusively for command executions. For broadcast listening, see ListenForBroadcasts().
-// The default value is 30 seconds (30*time.Second).
+func (c *Client) SetBroadcastHandler(handler BroadcastHandler) {
+	c.BroadcastHandler = handler
+}
+
+func (c *Client) SetDisconnectHandler(handler DisconnectHandler) {
+	c.DisconnectHandler = handler
+}
+
+func (c *Client) SetBroadcastChecker(checker BroadcastMessageChecker) {
+	c.BroadcastChecker = checker
+}
+
+func (c *Client) SetRestrictedPacketIDs(restrictedIDs []int32) {
+	c.RestrictedPacketIDs = restrictedIDs
+}
+
 func (c *Client) Connect() error {
-	dialer := net.Dialer{Timeout: time.Second * 10}
-
-	if c.config.Debug {
-		log.Println("Beginning dial to ", c.address)
-	}
-
-	rawConn, err := dialer.Dial("tcp", c.address)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", c.Host, c.Port), c.ConnTimeout)
 	if err != nil {
-		if c.config.Debug {
-			log.Println("Error dialing host", err)
-		}
+		return errors.Wrap(err, "tcp dial failure")
+	}
+	c.log.Debug("Dial successful, connection established.")
+
+	var ok bool
+	c.conn, ok = conn.(*net.TCPConn)
+	if !ok {
+		return errors.Wrap(err, "tcp dial failure")
+	}
+
+	if err := c.conn.SetDeadline(time.Now().Add(c.ConnTimeout)); err != nil {
+		return errors.Wrap(err, "could not set tcp connection deadline")
+	}
+
+	if err := c.authenticate(); err != nil {
+		c.log.Debug("Authentication failed", err)
 		return err
 	}
 
-	if c.config.Debug {
-		log.Println("Dial success to", c.address, ". Assigning conn variable")
-	}
-
-	c.mainConn = rawConn.(*net.TCPConn)
-
-	// Enable keepalive
-	if err := c.mainConn.SetKeepAlive(true); err != nil {
-		return err
-	}
-
-	if c.config.Debug {
-		log.Println("Keepalive enabled")
-	}
-
-	// Authenticate
-	if err := c.authenticate(c.mainConn); err != nil {
-		if c.config.Debug {
-			log.Println("Authentication failed", err)
-		}
-
-		return err
-	}
-
-	if c.config.Debug {
-		log.Println("Authentication successful")
-	}
-
-	if c.config.SendHeartbeatCommand {
-		c.startMainHeartBeat(nil)
-
-		if c.config.Debug {
-			log.Println("Main conn heartbeat routine started")
-		}
-	}
-
-	return nil
-}
-
-func (c *Client) Disconnect() error {
-	if c.mainConn != nil {
-		if c.config.Debug {
-			log.Println("Disconnecting from main conn")
-		}
-
-		c.mainMtx.Lock()
-		defer c.mainMtx.Unlock()
-
-		if err := c.mainConn.Close(); err != nil {
-			if c.config.Debug {
-				log.Println("Could not disconnect from main conn", err)
-			}
-
-			return err
-		}
-	}
-
-	if c.broadcastConn != nil {
-		if c.config.Debug {
-			log.Println("Disconnecting from broadcast conn")
-		}
-
-		c.bcastMtx.Lock()
-		defer c.bcastMtx.Unlock()
-
-		if err := c.broadcastConn.Close(); err != nil {
-			if c.config.Debug {
-				log.Println("Could not disconnect from broadcast conn", err)
-			}
-
-			return err
-		}
-	}
-
-	if c.config.DisconnectHandler != nil {
-		if c.config.Debug {
-			log.Println("Calling disconnect handler")
-		}
-
-		c.config.DisconnectHandler(nil, true)
-	}
-
-	return nil
-}
-
-// ExecCommand executes a command on the RCON server. It returns the response body from the server
-// or an error if something went wrong. This command is executed on the main socket.
-func (c *Client) ExecCommand(command string) (string, error) {
-	if c.config.Debug {
-		log.Println("Executing command:", command)
-	}
-
-	c.mainMtx.Lock()
-	defer c.mainMtx.Unlock()
-	return c.execCommand(c.mainConn, command)
-}
-
-// ListenForBroadcasts is the function which kicks of broadcast listening. It opens a second socket to the
-// RCON server meant specifically for listening for broadcasts and periodically runs a command to keep the
-// connection alive.
-//
-// You can choose to pass in initCommands which are run on the broadcast listener socket when connection is made.
-func (c *Client) ListenForBroadcasts(initCommands []string, errors chan error) {
-	// Make sure broadcast listening is enabled
-	if !c.config.EnableBroadcasts {
-		return
-	}
-
-	if c.config.Debug {
-		log.Println("Opening broadcast socket")
-	}
-
-	// Open broadcast socket
-	err := c.connectBroadcastListener(initCommands)
-	if err != nil {
-		if c.config.Debug {
-			log.Println("Could not open broadcast socket", err)
-		}
-
-		errors <- err
-	}
-
-	if c.config.SendHeartbeatCommand {
-		c.startBroadcasterHeartBeat(errors)
-	}
-
-	// Start listening for broadcasts
+	c.log.Debug("Starting writer routine")
 	go func() {
-		for {
-			c.bcastMtx.Lock()
-			response, err := buildPayloadFromPacket(c.broadcastConn)
-			c.bcastMtx.Unlock()
-			if err != nil {
-				if err == io.EOF || err == io.ErrClosedPipe {
-					fmt.Println("Broadcast listener closed")
-
-					if c.config.AttemptReconnect {
-						fmt.Println("Attempting to reconnect...")
-
-						// If EOF was read, then try reconnecting to the server.
-						err := c.connectBroadcastListener(initCommands)
-						if err != nil {
-							errors <- err
-						}
-					}
-
-					if c.config.DisconnectHandler != nil {
-						c.config.DisconnectHandler(err, false)
-					}
-
-					return
-				} else {
-					errors <- err
-				}
-			}
-
-			if response == nil {
-				continue
-			}
-
-			response.NonBroadcastPatterns = c.config.NonBroadcastPatterns
-			if response.isNotBroadcast() {
-				continue
-			}
-
-			if c.config.BroadcastHandler != nil {
-				c.config.BroadcastHandler(string(response.Body))
-			}
-		}
+		c.wgLock.Lock()
+		c.waitGroup.Add(1)
+		c.wgLock.Unlock()
+		c.startWriter()
 	}()
+
+	c.log.Debug("Starting reader routine")
+	go func() {
+		c.wgLock.Lock()
+		c.waitGroup.Add(1)
+		c.wgLock.Unlock()
+		c.startReader()
+	}()
+
+	return nil
 }
 
-func (c *Client) startBroadcasterHeartBeat(errors chan error) {
-	ticker := time.NewTicker(c.config.HeartbeatCommandInterval)
-	done := make(chan bool)
+func (c *Client) startWriter() {
+	defer func() {
+		c.wgLock.Lock()
+		c.waitGroup.Done()
+		c.wgLock.Unlock()
+		c.log.Debug("Writer routine terminated")
+	}()
 
-	// Start broadcast listener keepalive routine
+	for {
+		select {
+		case p := <-c.writeQueue:
+			if err := c.sendPacket(p); err != nil {
+				c.log.Debug("Could not write packet. Error: ", err)
+			}
+			break
+		case <-c.terminate:
+			c.log.Debug("Writer routine received termination signal")
+			return
+		}
+	}
+}
+
+func (c *Client) startReader() {
+	defer func() {
+		c.wgLock.Lock()
+		c.waitGroup.Done()
+		c.wgLock.Unlock()
+		c.log.Debug("Reader routine terminated")
+	}()
+
+	terminate := false
+
+	readChan := make(chan packet.Packet)
+
+	// Start select routine
 	go func() {
 		for {
+			// Add packet to mailbox
 			select {
-			case <-ticker.C:
-				keepAlivePayload := newPayload(serverDataExecCommand, []byte("Alive"), c.config.NonBroadcastPatterns)
-				keepAlivePacket, err := buildPacketFromPayload(keepAlivePayload)
-				if err != nil {
-					errors <- err
-					return
-				}
-
-				if c.config.Debug {
-					log.Println("Sending broadcast conn heartbeat command")
-				}
-
-				c.bcastMtx.Lock()
-				_, err = c.broadcastConn.Write(keepAlivePacket)
-				c.bcastMtx.Unlock()
-				if err != nil {
-					errors <- err
-					return
-				}
+			case p := <-readChan:
+				c.readQueue[p.ID()] <- p
+				c.log.Debug("Packet added to mailbox ID: ", p.ID())
 				break
-			case <-done:
-				if c.config.Debug {
-					log.Println("Broadcast heartbeat ticker done")
-				}
-				ticker.Stop()
-				close(done)
+			case <-c.terminate:
+				terminate = true
+				c.log.Debug("Reader routine received termination signal")
+				return
 			}
 		}
 	}()
-}
 
-func (c *Client) startMainHeartBeat(errors chan error) {
-	ticker := time.NewTicker(c.config.HeartbeatCommandInterval)
-	done := make(chan bool)
-
-	// Start keepalive routine
-	go func() {
-		for {
-			select {
-			case <-ticker.C:
-				if c.config.Debug {
-					log.Println("Sending main conn heartbeat command")
-				}
-
-				c.mainMtx.Lock()
-				_, err := c.execCommand(c.mainConn, "Alive")
-				if err != nil {
-					errors <- err
-				}
-				c.mainMtx.Unlock()
-				break
-			case <-done:
-				if c.config.Debug {
-					log.Println("Main heartbeat ticker done")
-				}
-
-				ticker.Stop()
-				close(done)
-			}
-		}
-	}()
-}
-
-func (c *Client) authenticate(socket *net.TCPConn) error {
-	payload := newPayload(serverDataAuth, []byte(c.password), c.config.NonBroadcastPatterns)
-
-	_, err := sendPayload(socket, payload)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (c *Client) execCommand(socket *net.TCPConn, command string) (string, error) {
-	payload := newPayload(serverDataExecCommand, []byte(command), c.config.NonBroadcastPatterns)
-
-	response, err := sendPayload(socket, payload)
-	if err != nil {
-		if err == io.EOF || err == io.ErrClosedPipe {
-			if c.config.AttemptReconnect {
-				fmt.Println("Attempting to reconnect...")
-
-				// If EOF was read, then try reconnecting to the server.
-				err := c.Connect()
-				if err != nil {
-					fmt.Println("RCON client failed to reconnect")
-					return "", err
-				}
-			}
-
-			if c.config.DisconnectHandler != nil {
-				c.config.DisconnectHandler(err, false)
-			}
-
-			return "", nil
+	for {
+		// Break out of the loop if we're meant to terminate this routine.
+		// We can be sure that terminate will be reached beyond the blocking readPacket call because the connection
+		// was closed before we received the termination signal, so the blocking readPacket call will error out and
+		// not block the termination instruction.
+		if terminate {
+			break
 		}
 
-		return "", err
-	}
-
-	return strings.TrimSpace(string(response.Body)), nil
-}
-
-func (c *Client) openBroadcastListenerSocket() error {
-	if c.config.Debug {
-		log.Println("Broadcast socket dialing to", c.address)
-	}
-
-	// Dial out with a second connection specifically meant for receiving broadcasts.
-	dialer := net.Dialer{Timeout: time.Second * 10}
-	bcConn, err := dialer.Dial("tcp", c.address)
-	if err != nil {
-		if c.config.Debug {
-			log.Println("Could not dial", c.address, "Error", err)
-		}
-
-		return err
-	}
-	c.broadcastConn = bcConn.(*net.TCPConn)
-
-	if c.config.Debug {
-		log.Println("Broadcast socket connected and assigned")
-	}
-
-	// Disable deadlines as we can't guarantee when we'll receive broadcasts
-	if err := c.broadcastConn.SetDeadline(time.Time{}); err != nil {
-		if c.config.Debug {
-			log.Println("Could not set broadcast socket deadline", err)
-		}
-
-		return err
-	}
-	if err := c.broadcastConn.SetReadDeadline(time.Time{}); err != nil {
-		if c.config.Debug {
-			log.Println("Could not set broadcast socket read deadline", err)
-		}
-
-		return err
-	}
-	if err := c.broadcastConn.SetWriteDeadline(time.Time{}); err != nil {
-		if c.config.Debug {
-			log.Println("Could not set broadcast socket write deadline", err)
-		}
-
-		return err
-	}
-	if err := c.broadcastConn.SetKeepAlive(true); err != nil {
-		if c.config.Debug {
-			log.Println("Could not set broadcast socket keepalive", err)
-		}
-
-		return err
-	}
-
-	return nil
-}
-
-func (c *Client) connectBroadcastListener(initCommands []string) error {
-	// Dial out with a second connection specifically meant
-	// for receiving broadcasts.
-	err := c.openBroadcastListenerSocket()
-	if err != nil {
-		return err
-	}
-
-	if c.config.Debug {
-		log.Println("Attempting broadcast socket authentication")
-	}
-
-	// Authenticate
-	err = c.authenticate(c.broadcastConn)
-	if err != nil {
-		if c.config.Debug {
-			log.Println("Could not authenticate on broadcast socket", err)
-		}
-
-		return err
-	}
-
-	c.mainMtx.Lock()
-	defer c.mainMtx.Unlock()
-
-	// Subscribe to broadcast types
-	for _, cmd := range initCommands {
-		_, err := c.execCommand(c.broadcastConn, cmd)
+		p, err := c.readPacket()
 		if err != nil {
-			return err
+			switch errors.Cause(err) {
+			case errs.ErrNotConnected:
+				break
+			case io.EOF:
+				c.log.Error("Disconnected by the server. Error: ", err)
+				c.disconnect(err)
+				break
+			case io.ErrClosedPipe:
+				c.disconnect(err)
+				c.log.Error("Attempted to read from a closed pipe. Error: ", err)
+				break
+			default:
+				c.log.Debug("Reader error: ", err)
+			}
+
+			continue
+		}
+
+		packetID := p.ID()
+
+		// Check if this packet is a broadcast message
+		if c.BroadcastChecker(p) {
+			c.log.Debug("Packet ", packetID, " is a broadcast message")
+
+			// If this packet is a broadcast, notify broadcast listener and jump to next read.
+			if c.BroadcastHandler != nil {
+				newBody := p.Body()
+				newBody = newBody[:len(newBody)-1] // strip null terminator
+
+				c.BroadcastHandler(string(newBody))
+			}
+
+			continue
+		} else {
+			c.log.Debug("Packet ", packetID, " was not a broadcast", p.Type(), string(p.Body()))
+
+			// Put packet on the read channel if it's not a broadcast
+			select {
+			case readChan <- p:
+				break
+			case <-time.After(c.QueueWriteTimeout):
+				c.log.Debug("Packet ", packetID, " was unexpected (no open mailbox)")
+				break
+			}
 		}
 	}
+}
+
+func (c *Client) Close() error {
+	c.log.Debug("Close called")
+
+	if c.conn == nil {
+		return errs.ErrNotConnected
+	}
+
+	c.disconnect(nil)
 
 	return nil
+}
+
+func (c *Client) disconnect(err error) {
+	// Closing the termination channel makes all routines return
+	close(c.terminate)
+
+	_ = c.conn.Close()
+	c.conn = nil
+
+	if c.DisconnectHandler != nil {
+		c.DisconnectHandler(err, err == nil)
+	}
+}
+
+func (c *Client) authenticate() error {
+	p := c.newClientPacket(packet.TypeAuth, c.Password)
+
+	if err := c.sendPacket(p); err != nil {
+		return errors.Wrap(err, "could not send packet")
+	}
+
+	res, err := c.readPacketTimeout()
+	if err != nil {
+		return errors.Wrap(err, "could not get auth response")
+	}
+
+	if res.Type() != packet.TypeAuthRes {
+		return errors.Wrap(err, "packet was not of the type auth response")
+	}
+
+	if res.ID() == packet.AuthFailedID {
+		return errors.Wrap(errs.ErrAuthentication, "authentication failed")
+	}
+
+	c.log.Debug("Authenticated successfully")
+
+	return nil
+}
+
+func (c *Client) WaitGroup() *sync.WaitGroup {
+	return c.waitGroup
+}
+
+func (c *Client) ExecCommand(command string) (string, error) {
+	p := c.newClientPacket(packet.TypeCommand, command)
+
+	if err := c.enqueuePacket(p); err != nil {
+		return "", errors.Wrap(err, "could not enqueue command packet")
+	}
+
+	res, err := c.getResponse(p.ID())
+	if err != nil {
+		return "", errors.Wrap(err, "could not get command response")
+	}
+
+	// Trim off null terminator
+	body := res.Body()
+	body = body[:len(body)-1]
+
+	return string(body), nil
+}
+
+func (c *Client) enqueuePacket(p packet.Packet) error {
+	// We use c.QueueWriteTimeout to set a timeout for packet queuing. If something happens and the packet cannot be put onto the
+	// queue within the set timeout, an error is returned.
+	select {
+	case c.writeQueue <- p:
+		c.log.Debug("Packet queued", " ID: ", p.ID())
+		// Create a mailbox for this packet. A mailbox is simply a channel which responses will be put on.
+		c.readQueue[p.ID()] = make(chan packet.Packet)
+
+		return nil
+	case <-time.After(c.QueueWriteTimeout):
+		c.log.Debug("Packet queue timed out", " ID: ", p.ID())
+		return errors.Wrap(errs.ErrQueueTimeout, "packet queue operation timed out")
+	}
+}
+
+func (c *Client) getResponse(packetID int32) (packet.Packet, error) {
+	defer func() {
+		// When read operation is complete, delete packet mailbox.
+		c.rqLock.Lock()
+		close(c.readQueue[packetID])
+		delete(c.readQueue, packetID)
+		c.rqLock.Unlock()
+	}()
+
+	// We use c.QueueReadTimeout to set a timeout for response fetching. If something happens and no response can be pulled from
+	// the mailbox with the provided packet ID within the set timeout period, an error is returned.
+	select {
+	case p := <-c.readQueue[packetID]:
+		c.log.Debug("Packet removed from mailbox ID: ", packetID)
+		return p, nil
+	case <-time.After(c.QueueReadTimeout):
+		return nil, errors.Wrap(errs.ErrReadTimeout, "mailbox read operation timed out")
+	}
+}
+
+// newClientPacket is a wrapper function for packet.NewClientPacket. It makes creating packets a bit easier by automatically
+// populating client-specific fields so that this doesn't need to be done manually.
+func (c *Client) newClientPacket(pType packet.PacketType, body string) packet.Packet {
+	return packet.NewClientPacket(c.EndianMode, pType, body, c.RestrictedPacketIDs)
 }
