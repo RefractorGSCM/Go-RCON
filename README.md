@@ -1,3 +1,7 @@
+![GitHub](https://img.shields.io/github/license/RefractorGSCM/RCON?style=flat-square)
+![GitHub tag (latest by date)](https://img.shields.io/github/v/tag/RefractorGSCM/RCON?style=flat-square)
+![GitHub contributors](https://img.shields.io/github/contributors/RefractorGSCM/RCON?style=flat-square)
+
 # Go-RCON
 
 *This repository is simply named RCON, but will be referred to as Go-RCON for clarity.*
