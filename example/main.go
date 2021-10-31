@@ -3,88 +3,50 @@ package main
 import (
 	"fmt"
 	"github.com/refractorgscm/rcon"
+	"github.com/refractorgscm/rcon/presets"
 	"log"
-	"regexp"
-	"time"
-)
-
-var (
-	host            = "localhost"
-	port     uint16 = 7778
-	password        = "RconPassword"
+	"os"
+	"os/signal"
+	"syscall"
 )
 
 func main() {
-	clientConfig := &rcon.ClientConfig{
-		Host:                     host,
-		Port:                     port,
-		Password:                 password,
-		EnableBroadcasts:         true,
-		BroadcastHandler:         broadcastHandler,
-		DisconnectHandler:        disconnectHandler,
-		SendHeartbeatCommand:     true,
-		HeartbeatCommandInterval: time.Second * 5,
-		NonBroadcastPatterns: []*regexp.Regexp{
-			regexp.MustCompile("^Keeping client alive for another [0-9]+ seconds$"),
+	client := rcon.NewClient(&rcon.Config{
+		Host:     "127.0.0.1",
+		Port:     7779,
+		Password: "RconPassword",
+		BroadcastHandler: func(msg string) {
+			fmt.Println("RECEIVED BROADCAST", msg)
 		},
-	}
+		RestrictedPacketIDs: presets.MordhauRestrictedPacketIDs,
+		BroadcastChecker:    presets.MordhauBroadcastChecker,
+		DisconnectHandler: func(err error, expected bool) {
+			if !expected {
+				log.Println("An unexpected disconnection has occurred. Error:", err)
+			} else {
+				log.Println("An expected disconnection has occurred.")
+			}
+		},
+	}, &presets.DebugLogger{})
 
-	client := rcon.NewClient(clientConfig)
-
-	// Connect the main socket to the RCON server
 	if err := client.Connect(); err != nil {
-		log.Fatal(err)
+		log.Fatalf("Could not connect. Error: %v\n", err)
 	}
 
-	// Optional but highly recommended: create an error channel to receive errors from
-	// the ListenForBroadcasts goroutine.
-	errors := make(chan error)
+	res, err := client.ExecCommand("listen allon")
+	if err != nil {
+		log.Fatalf("Could not execute command. Error: %v\n", err)
+	}
+	log.Println(res)
 
-	// Connect broadcast socket to the RCON server and start listening for broadcasts
-	client.ListenForBroadcasts([]string{"listen allon"}, nil)
-
-	_, _ = client.ExecCommand("Alive")
-
-	// Disconnect after 20 seconds
+	// Cleanup on CTRL+C
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGINT)
 	go func() {
-		time.Sleep(time.Second * 20)
-
-		if err := client.Disconnect(); err != nil {
-			fmt.Printf("Disconnect error: %v\n", err)
-		}
+		<-c
+		log.Println("Shutting down...")
+		_ = client.Close()
 	}()
 
-	// Enter infinite loop to keep the program running. You wouldn't want to do this in practice.
-	// Normally you would likely have a webserver or some other listening code you're running this
-	// alongside which would keep the process running for you.
-	for {
-		select {
-		case err := <-errors:
-			log.Fatalf("ListenForBroadcasts error: %v", err)
-		default:
-			break
-		}
-
-		// Run basic command on the main RCON socket for demo purposes.
-		//response, err := client.ExecCommand("PlayerList")
-		//if err != nil {
-		//	log.Fatal(err)
-		//}
-
-		// fmt.Println("Main Socket Response:", response)
-
-		time.Sleep(1 * time.Second)
-	}
-}
-
-func broadcastHandler(broadcast string) {
-	fmt.Println("Received broadcast:", broadcast)
-}
-
-func disconnectHandler(err error, expected bool) {
-	if !expected {
-		fmt.Printf("An unexpected disconnect occurred. Error: %v\n", err)
-	} else {
-		fmt.Println("An expected disconnect occurred. All OK.")
-	}
+	client.WaitGroup().Wait()
 }
