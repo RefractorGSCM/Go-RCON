@@ -46,6 +46,8 @@ func (c *Client) readPacket() (packet.Packet, error) {
 		return nil, errors.Wrap(err, "could not read packet")
 	}
 
+	c.log.Debug("Read packet ID: ", res.ID(), ", Body: ", string(res.Body()))
+
 	return res, nil
 }
 

@@ -357,11 +357,15 @@ func (c *Client) ExecCommand(command string) (string, error) {
 func (c *Client) ExecCommandNoResponse(command string) error {
 	p := c.newClientPacket(packet.TypeCommand, command)
 
-	c.log.Debug("Executing command (expecting no response): ", command)
+	c.log.Debug("Executing command (no response needed): ", command)
 
-	if err := c.enqueuePacket(p, false); err != nil {
+	if err := c.enqueuePacket(p, true); err != nil {
 		return errors.Wrap(err, "could not enqueue command packet")
 	}
+
+	// We still need to try to get the response or the connection will be put in a bad state.
+	// Since we're not actually expecting a response, we can just ignore it or any errors which occurred.
+	_, _ = c.getResponse(p.ID())
 
 	return nil
 }
