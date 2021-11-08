@@ -336,7 +336,9 @@ func (c *Client) WaitGroup() *sync.WaitGroup {
 func (c *Client) ExecCommand(command string) (string, error) {
 	p := c.newClientPacket(packet.TypeCommand, command)
 
-	if err := c.enqueuePacket(p); err != nil {
+	c.log.Debug("Executing command: ", command)
+
+	if err := c.enqueuePacket(p, true); err != nil {
 		return "", errors.Wrap(err, "could not enqueue command packet")
 	}
 
@@ -352,14 +354,29 @@ func (c *Client) ExecCommand(command string) (string, error) {
 	return string(body), nil
 }
 
-func (c *Client) enqueuePacket(p packet.Packet) error {
+func (c *Client) ExecCommandNoResponse(command string) error {
+	p := c.newClientPacket(packet.TypeCommand, command)
+
+	c.log.Debug("Executing command (expecting no response): ", command)
+
+	if err := c.enqueuePacket(p, false); err != nil {
+		return errors.Wrap(err, "could not enqueue command packet")
+	}
+
+	return nil
+}
+
+func (c *Client) enqueuePacket(p packet.Packet, createMailbox bool) error {
 	// We use c.QueueWriteTimeout to set a timeout for packet queuing. If something happens and the packet cannot be put onto the
 	// queue within the set timeout, an error is returned.
 	select {
 	case c.writeQueue <- p:
 		c.log.Debug("Packet queued", " ID: ", p.ID())
-		// Create a mailbox for this packet. A mailbox is simply a channel which responses will be put on.
-		c.readQueue[p.ID()] = make(chan packet.Packet)
+
+		if createMailbox {
+			// Create a mailbox for this packet. A mailbox is simply a channel which responses will be put on.
+			c.readQueue[p.ID()] = make(chan packet.Packet)
+		}
 
 		return nil
 	case <-time.After(c.QueueWriteTimeout):

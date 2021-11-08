@@ -33,11 +33,11 @@ func main() {
 		log.Fatalf("Could not connect. Error: %v\n", err)
 	}
 
-	res, err := client.ExecCommand("listen allon")
+	res, err := client.ExecCommand("listen chat")
 	if err != nil {
 		log.Fatalf("Could not execute command. Error: %v\n", err)
 	}
-	log.Println(res)
+	fmt.Println(res)
 
 	// Cleanup on CTRL+C
 	c := make(chan os.Signal, 1)
